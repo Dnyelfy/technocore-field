@@ -12,14 +12,19 @@ from playwright.sync_api import sync_playwright
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 DUP = "Another day, another check-in. The decentralized AI vision is compelling."
 MSGS = [
-    {"seq": 1, "from": "did:key:z6MkAlphaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "text": DUP},
-    {"seq": 2, "from": "did:key:z6MkBravoBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "text": DUP},
-    {"seq": 3, "from": "did:key:z6MkCharlieCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "text": DUP},
-    {"seq": 4, "from": "alice", "text": "gm, anyone actually building here?"},
-    {"seq": 5, "from": "did:key:z6MkDeltaDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    # kalabalik once: 400 ayri anahtar. Alanda en fazla 260'i cizilmeli.
+    {"seq": i + 1, "from": f"did:key:z6Mk{i:040d}", "text": f"agent {i} checking in"}
+    for i in range(400)
+] + [
+    # en son konusanlar: alanda kalmalari gerekenler
+    {"seq": 401, "from": "did:key:z6MkAlphaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "text": DUP},
+    {"seq": 402, "from": "did:key:z6MkBravoBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "text": DUP},
+    {"seq": 403, "from": "did:key:z6MkCharlieCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "text": DUP},
+    {"seq": 404, "from": "alice", "text": "gm, anyone actually building here?"},
+    {"seq": 405, "from": "did:key:z6MkDeltaDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
      "text": "faucet — using previously learned faucet command"},
 ]
-state = {"mode": "ok"}
+state = {"mode": "ok", "tick": 0}
 
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=ROOT)
 socketserver.TCPServer.allow_reuse_address = True
@@ -27,11 +32,25 @@ httpd = socketserver.TCPServer(("127.0.0.1", 8082), handler)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 def route(r):
+    """Gercek servis gibi davranir: since'i uygular ve her yoklamada yeni mesaj uretir."""
     if state["mode"] == "fail":
         r.fulfill(status=502, content_type="application/json", body='{"error":"upstream 503"}')
         return
+    from urllib.parse import urlparse, parse_qs
+    since = int((parse_qs(urlparse(r.request.url).query).get("since") or ["0"])[0])
+    if since == 0:
+        out, last = MSGS, 405
+    else:
+        state["tick"] += 1
+        base = 405 + (state["tick"] - 1) * 6
+        out = [{"seq": base + i + 1, "from": f"did:key:z6Mk{state['tick']}{i:039d}",
+                "text": f"tick {state['tick']} message {i}"} for i in range(6)]
+        # her turda bir tekrar: sari isaretlemesi canli akista da calismali
+        out.append({"seq": base + 7, "from": f"did:key:z6MkRepeat{state['tick']:035d}",
+                    "text": DUP})
+        last = base + 7
     r.fulfill(status=200, content_type="application/json",
-              body=json.dumps({"room": "lobby", "last_seq": 5, "messages": MSGS}))
+              body=json.dumps({"room": "lobby", "last_seq": last, "messages": out}))
 
 fails = []
 with sync_playwright() as pw:
@@ -58,6 +77,12 @@ with sync_playwright() as pw:
         return { green, amber, white };
     }""")
     print(f"  imzali figür pikseli: {got['green']} · tekrar eden (sarı): {got['amber']} · balon: {got['white']}")
+    drawn = page.evaluate("() => window.__drawn")
+    print(f"  çizilen figür: {drawn['figures']} (<=260) · balon: {drawn['bubbles']} (<=4)")
+    if drawn["figures"] > 260:
+        fails.append(f"figür sınırı aşılmış: {drawn['figures']}")
+    if drawn["bubbles"] > 4:
+        fails.append(f"balon sınırı aşılmış: {drawn['bubbles']}")
     if got["amber"] < 20:
         fails.append("aynı cümleyi tekrarlayan anahtarlar sarı işaretlenmemiş")
     if got["white"] < 500:
@@ -66,7 +91,7 @@ with sync_playwright() as pw:
     strip = page.evaluate("""() => {
         const c = document.getElementById('field');
         const g = c.getContext('2d');
-        const d = g.getImageData(0, Math.round(c.height*0.85), c.width, 20).data;
+        const d = g.getImageData(0, c.height - 40, c.width, 38).data;
         // Dolgu gradyaninin tepesi ~99; yer tutucu yazi 81. Esik ikisini ayirir.
         let lit = 0;
         for (let i = 0; i < d.length; i += 4) if (d[i+1] > 95 && d[i+1] > d[i] + 20) lit++;
@@ -76,7 +101,23 @@ with sync_playwright() as pw:
     if strip > 400:
         fails.append("ilk yükleme hız şeridinde sahte zirve yaratmış")
 
+    page.wait_for_timeout(5200)   # ikinci yoklama gelsin
     page.screenshot(path="/mnt/user-data/outputs/technocore-field.png")
+
+    # Hiz seridi: iki yoklama arasi gelen toplu mesaj tek saniyeye yigilmamali.
+    rate = page.evaluate("""() => {
+        const c = document.getElementById('field');
+        const g = c.getContext('2d');
+        // Gradyan tepede .42, dipte .03 saydam. Olcum tepeden yapilmali; dip zeminden
+        // ayirt edilemiyor. Yer tutucu yazi bu bandin uzerinde kaliyor.
+        const d = g.getImageData(0, c.height - 122, c.width, 60).data;
+        let lit = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i+1] > 30 && d[i+1] > d[i] + 8) lit++;
+        return lit;
+    }""")
+    print(f"  ikinci yoklamadan sonra şerit dolgusu: {rate} (>0 olmalı)")
+    if rate == 0:
+        fails.append("şerit hiç dolmadı — hız hesabı çalışmıyor")
 
     state["mode"] = "fail"
     page.wait_for_timeout(5000)
