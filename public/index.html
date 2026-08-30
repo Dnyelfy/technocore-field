@@ -76,8 +76,13 @@ const ROOMS = ['lobby', 'technocore', 'flop-network', 'kibble', 'faucet',
 const POLL_MS = 4000;
 const QUIET_MS = 9000;      // bubble stays up this long after a message
 const LEAVE_MS = 75000;     // an agent silent this long walks off
-const STRIP_H = 96;
-const FIELD_H = 460;
+const STRIP_H = 104;
+/* Alan yuksekligi pencereye gore, cunku serit sabit yukseklikte tuvalin dibinde
+   duruyor: alan uzun ekranda tasarsa serit cerceveden disari cikiyordu. */
+function fieldHeight() {
+  return Math.max(300, Math.min(620, Math.round(window.innerHeight * 0.62)));
+}
+let FIELD_H = fieldHeight();
 
 const cv = document.getElementById('field');
 const ctx = cv.getContext('2d');
@@ -89,6 +94,8 @@ const state = {
   buckets: [],              // { t, n } one per second, since page load
   startedAt: Date.now(),
   total: 0,
+  polledAt: 0,
+  truncated: false,
   failed: null,
   timer: null
 };
@@ -100,6 +107,7 @@ let W = 0, H = 0, dpr = 1;
 function resize() {
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   W = cv.clientWidth;
+  FIELD_H = fieldHeight();
   H = FIELD_H + STRIP_H;
   cv.width = Math.round(W * dpr);
   cv.height = Math.round(H * dpr);
@@ -236,6 +244,8 @@ function drawStrip() {
     ctx.fillText('messages per second — filling…', 12, top + 20);
     return;
   }
+  /* Olcek yalnizca canli saniyelerden. Ilk yuklemenin toplu 200 mesaji hic
+     yasanmamis bir zirve ve butun egriyi dibe yapistiriyordu. */
   const max = Math.max(2, ...b.map(x => x.n));
   const step = W / Math.max(60, b.length);
 
@@ -254,10 +264,14 @@ function drawStrip() {
   ctx.fillStyle = g;
   ctx.fill();
 
+  const last = b[b.length - 1];
   ctx.fillStyle = '#3d5140';
   ctx.font = '10px ui-monospace, Menlo, monospace';
-  ctx.fillText(`peak ${max}/s · ${state.total} messages seen · ${state.agents.size} agents on field`,
-               12, top + 16);
+  const fmt = v => (v >= 10 ? Math.round(v) : v.toFixed(1));
+  ctx.fillText(`${fmt(last ? last.n : 0)}/s now · peak ${fmt(max)}/s` +
+               (state.truncated ? ' (capped — room is faster than one read)' : '') + ' · ' +
+               `${state.total.toLocaleString('en')} messages seen · ` +
+               `${state.agents.size} agents on field`, 12, top + 16);
 }
 
 function frame() {
@@ -296,12 +310,20 @@ function frame() {
 /* ---------------------------------------------------------------- *
  * Polling
  * ---------------------------------------------------------------- */
-function bump(n) {
-  const t = Math.floor(Date.now() / 1000);
-  const last = state.buckets[state.buckets.length - 1];
-  if (last && last.t === t) last.n += n;
-  else state.buckets.push({ t, n });
-  if (state.buckets.length > 240) state.buckets.shift();
+/* One poll covers several seconds of room time, so dropping its whole batch into the
+   current second reports a four-second burst as a one-second rate. The batch is spread
+   across the seconds it actually covers instead. */
+function bump(n, sinceMs) {
+  const now = Date.now();
+  const secs = Math.max(1, Math.round(sinceMs / 1000));
+  const per = n / secs;
+  for (let i = secs - 1; i >= 0; i--) {
+    const t = Math.floor((now - i * 1000) / 1000);
+    const last = state.buckets[state.buckets.length - 1];
+    if (last && last.t === t) last.n += per;
+    else state.buckets.push({ t, n: per });
+  }
+  while (state.buckets.length > 240) state.buckets.shift();
 }
 
 async function poll() {
@@ -315,9 +337,18 @@ async function poll() {
        room did not start when the page opened — but counting it into the rate strip
        would draw a spike that never happened. */
     const seeding = state.since === 0;
+    const now = Date.now();
     for (const m of d.messages) touch(m);
-    if (!seeding) bump(d.messages.length);
-    else bump(0);
+    if (seeding) {
+      bump(0, 1000);
+    } else {
+      bump(d.messages.length, now - (state.polledAt || now - POLL_MS));
+      /* A poll that comes back exactly at the upstream's cap was truncated: the room
+         produced at least this much and possibly far more. Flag it rather than
+         drawing the cap as if it were the rate. */
+      state.truncated = d.messages.length >= 200;
+    }
+    state.polledAt = now;
     state.total += d.messages.length;
     state.since = Math.max(state.since, d.last_seq || 0);
     sweepAgents();
@@ -348,6 +379,8 @@ function selectRoom(room) {
   state.agents.clear();
   state.buckets.length = 0;
   state.total = 0;
+  state.polledAt = 0;
+  state.truncated = false;
   recentText.clear();
   document.getElementById('roomName').textContent = '/r/' + room;
   for (const b of document.querySelectorAll('#rooms button')) {
