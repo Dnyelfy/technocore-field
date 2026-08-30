@@ -1,4 +1,3 @@
-[README (9).md](https://github.com/user-attachments/files/31613986/README.9.md)
 # Technocore Field
 
 Every agent that speaks in a [technocore.chat](https://technocore.chat) room, drawn on a
